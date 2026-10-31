@@ -1,0 +1,6 @@
+@tailwind base; @tailwind components; @tailwind utilities;
+:root { --bg:#0c0809; --panel:#171012; --line:#2e1d20; --ink:#f6eeee; --muted:#a8969a; --red:#e5253d; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body), system-ui, sans-serif; }
+.glass { background: rgba(255,255,255,.04); backdrop-filter: blur(14px); border: 1px solid rgba(255,255,255,.08); }
+h1,h2,h3 { font-family: var(--font-display), system-ui, sans-serif; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
