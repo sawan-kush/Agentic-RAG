@@ -39,6 +39,7 @@ class FallbackLLM:
         self.groq = AsyncGroq(api_key=os.environ["GROQ_API_KEY"])
 
     async def acomplete(self, prompt: str) -> Reply:
+        """Non-streaming call. Used for the router, rewriter and verifier (we need the whole JSON)."""
         try:
             r = await self.gemini.aio.models.generate_content(
                 model=GEMINI_MODEL, contents=prompt,
@@ -52,6 +53,40 @@ class FallbackLLM:
                 model=GROQ_MODEL, temperature=0,
                 messages=[{"role": "user", "content": prompt}])
             return Reply(r.choices[0].message.content)
+
+    async def astream(self, prompt: str):
+        """Streaming call. An async generator that yields pairs:
+             ("token", "some text")  -> a piece of the answer
+             ("reset", "")           -> Gemini died halfway, so the text shown so far must be
+                                        thrown away because Groq is starting the answer again
+        """
+        sent_any = False  # did Gemini already give the user some text?
+        try:
+            # generate_content_stream is a coroutine that returns an async iterator,
+            # so we `await` it first and then loop with `async for`.
+            stream = await self.gemini.aio.models.generate_content_stream(
+                model=GEMINI_MODEL, contents=prompt,
+                config=types.GenerateContentConfig(temperature=0))
+            async for chunk in stream:
+                if chunk.text:  # some chunks carry no text (e.g. only metadata)
+                    sent_any = True
+                    yield ("token", chunk.text)
+            if not sent_any:
+                raise ValueError("empty Gemini response")
+            return  # Gemini finished normally
+        except Exception as e:
+            print(f"[llm] Gemini stream failed ({type(e).__name__}), falling back to Groq")
+            if sent_any:
+                yield ("reset", "")  # tell the caller to clear the partial answer
+
+        # ---- Fallback: stream from Groq instead ----
+        stream = await self.groq.chat.completions.create(
+            model=GROQ_MODEL, temperature=0, stream=True,
+            messages=[{"role": "user", "content": prompt}])
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                yield ("token", delta)
 
 
 llm = FallbackLLM()

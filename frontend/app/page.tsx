@@ -3,7 +3,7 @@ import { Route, Search, ShieldCheck, Zap } from "lucide-react";
 
 const features = [
   { icon: Route, title: "Agentic router", text: "Each question goes to the right tool: chat, document metadata, or search." },
-  { icon: Search, title: "Vector search", text: "Hybrid retrieval over every chunk of every file you upload." },
+  { icon: Search, title: "Hybrid search", text: "Meaning-based and keyword search, combined, over every chunk of every file you upload." },
   { icon: ShieldCheck, title: "Checked answers", text: "A verifier compares each answer with the source text before you see it." },
   { icon: Zap, title: "Ready in seconds", text: "Drop in PDFs, TXT or Markdown and start asking." },
 ];
@@ -35,7 +35,7 @@ export default function Landing() {
       </section>
       <footer className="border-t border-[var(--line)] px-6 py-8 text-sm text-[var(--muted)]">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4">
-          <nav className="flex gap-6"><a href="#">Docs</a><a href="#">Privacy</a><a href="#">Status</a></nav>
+          <nav className="flex gap-6"><Link href="/docs">Docs</Link><Link href="/privacy">Privacy</Link><Link href="/status">Status</Link></nav>
           <span className="inline-flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-green-500" />All systems operational</span>
         </div>
       </footer>

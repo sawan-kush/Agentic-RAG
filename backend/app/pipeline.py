@@ -1,24 +1,74 @@
-"""Orchestrates the 3 agents. Yields events the UI shows as the agent trace."""
+"""Orchestrates the 3 agents. Yields events that main.py streams to the browser.
+
+Event types (one JSON object per line):
+  trace     {"agent","detail","ms"}      what each agent did (shown as the agent trace)
+  token     {"text"}                     next piece of the answer (append it)
+  replace   {"text"}                     overwrite the WHOLE answer text with this one
+  verified  {"grounded","unsupported"}   result of the verifier (only for document answers)
+  done      {"sources"}                  always the last event
+"""
 import asyncio, time
 from app.config import llm, supabase
-from app.agents.router import route_query
+from app.agents.router import route_query, format_history
 from app.agents.retriever import retrieve
 from app.agents.verifier import verify
 
 MAX_RETRIES = 1
+ROUTES = {"direct", "sql", "vector"}
 
 
 def trace(agent: str, detail: str, started: float) -> dict:
     return {"type": "trace", "agent": agent, "detail": detail, "ms": round((time.perf_counter() - started) * 1000)}
 
 
-async def run_pipeline(query: str, user_id: str):
+async def stream_llm(prompt: str, parts: list[str]):
+    """Streams the LLM answer as token events and records the pieces in `parts`.
+    (An async generator can't `return` a value, so the caller reads the full text from `parts`.)"""
+    async for kind, piece in llm.astream(prompt):
+        if kind == "reset":  # Gemini failed midway and Groq restarts: wipe the partial text
+            parts.clear()
+            yield {"type": "replace", "text": ""}
+        else:
+            parts.append(piece)
+            yield {"type": "token", "text": piece}
+
+
+async def safe_verify(answer: str, chunks) -> dict:
+    """Never let a verifier hiccup (bad JSON, API error) destroy an answer the user already sees."""
+    try:
+        v = await verify(answer, chunks)
+        return {"grounded": bool(v.get("grounded")), "unsupported": list(v.get("unsupported") or []), "failed": False}
+    except Exception as e:
+        print(f"[verifier] failed: {type(e).__name__}: {e}")
+        return {"grounded": False, "unsupported": [], "failed": True}
+
+
+def answer_prompt(query: str, chunks, hist_text: str) -> str:
+    ctx = "\n\n".join(f"[{i}] ({c.file_name}) {c.text}" for i, c in enumerate(chunks))
+    convo = f"Conversation so far (only to understand the question):\n{hist_text}\n\n" if hist_text else ""
+    return (f"Answer ONLY from the context. If it is not there, say you could not find it.\n\n"
+            f"{convo}Context:\n{ctx}\n\nQuestion: {query}")
+
+
+async def run_pipeline(query: str, user_id: str, history: list[dict] | None = None):
+    history = history or []
+    hist_text = format_history(history)
+
     t = time.perf_counter()
-    r = await route_query(query)
-    yield trace("Router", f"{r['route']}: {r['reason']}", t)
+    try:
+        r = await route_query(query, history)
+        if r.get("route") not in ROUTES:
+            raise ValueError(f"bad route {r.get('route')!r}")
+    except Exception as e:  # if the router fails, searching the documents is the safest default
+        print(f"[router] failed: {type(e).__name__}: {e}")
+        r = {"route": "vector", "reason": "router unavailable, searching your documents"}
+    yield trace("Router", f"{r['route']}: {r.get('reason', '')}", t)
 
     if r["route"] == "direct":
-        yield {"type": "answer", "text": (await llm.acomplete(query)).text, "sources": []}
+        prompt = f"Conversation so far:\n{hist_text}\n\nReply to the latest user message: {query}" if hist_text else query
+        async for ev in stream_llm(prompt, []):
+            yield ev
+        yield {"type": "done", "sources": []}
         return
 
     if r["route"] == "sql":
@@ -27,26 +77,46 @@ async def run_pipeline(query: str, user_id: str):
         rows = await asyncio.to_thread(lambda: supabase.table("documents")
             .select("file_name,created_at,chunk_count,size_bytes").eq("user_id", user_id).execute().data)
         yield trace("Metadata query", f"{len(rows)} rows", t)
-        ans = await llm.acomplete(f"Answer using this document list only:\n{rows}\n\nQ: {query}")
-        yield {"type": "answer", "text": ans.text, "sources": []}
+        async for ev in stream_llm(f"Answer using this document list only:\n{rows}\n\nQ: {query}", []):
+            yield ev
+        yield {"type": "done", "sources": []}
         return
 
+    # ---- vector route: retrieve -> stream a draft -> verify -> (maybe) retry once ----
     top_k, chunks, answer = 5, [], ""
-    for _ in range(MAX_RETRIES + 1):
+    for attempt in range(MAX_RETRIES + 1):
         t = time.perf_counter()
-        chunks, subs = await retrieve(query, user_id, top_k)
-        yield trace("Retriever", f"{len(chunks)} chunks, top-k {top_k}, {len(subs)} sub-queries", t)
+        chunks, subs = await retrieve(query, user_id, top_k, history)
+        yield trace("Retriever", f"{len(chunks)} chunks (hybrid), top-k {top_k}, {len(subs)} sub-queries", t)
+        prompt = answer_prompt(query, chunks, hist_text)
 
-        ctx = "\n\n".join(f"[{i}] ({c.file_name}) {c.text}" for i, c in enumerate(chunks))
-        answer = (await llm.acomplete(
-            f"Answer ONLY from the context. If it is not there, say you could not find it.\n\nContext:\n{ctx}\n\nQuestion: {query}")).text
+        if attempt == 0:
+            # First try: the user watches the draft appear word by word.
+            parts: list[str] = []
+            async for ev in stream_llm(prompt, parts):
+                yield ev
+            answer = "".join(parts)
+        else:
+            # Retry: generate quietly. The user already has a draft on screen, and we only
+            # swap it out (with a `replace` event) once the new answer has been checked.
+            answer = (await llm.acomplete(prompt)).text
 
         t = time.perf_counter()
-        v = await verify(answer, chunks)
-        yield trace("Verifier", "grounded" if v["grounded"] else f"ungrounded: {len(v['unsupported'])} claims", t)
-        if v["grounded"]:
-            break
-        top_k = 12  # widen the search and try once more
+        v = await safe_verify(answer, chunks)
+        if v["failed"]:
+            detail = "check failed, answer not verified"
+        else:
+            detail = "grounded" if v["grounded"] else f"ungrounded: {len(v['unsupported'])} claims"
+        yield trace("Verifier", detail, t)
+
+        if not v["grounded"] and not v["failed"] and attempt < MAX_RETRIES:
+            top_k = 12  # widen the search and try once more
+            continue
+
+        if attempt > 0:  # the draft is being corrected: overwrite it with the re-checked answer
+            yield {"type": "replace", "text": answer}
+        yield {"type": "verified", "grounded": v["grounded"], "unsupported": len(v["unsupported"])}
+        break
 
     sources = list({c.doc_id: {"docId": c.doc_id, "fileName": c.file_name} for c in chunks}.values())
-    yield {"type": "answer", "text": answer, "sources": sources}
+    yield {"type": "done", "sources": sources}
