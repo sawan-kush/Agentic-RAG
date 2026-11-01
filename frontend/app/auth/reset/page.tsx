@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
+import Logo from "@/components/logo";
 
 // The page the "reset password" email links to.
 // When it loads, the Supabase browser client automatically reads the `?code=...` in the URL and
@@ -34,25 +35,28 @@ export default function ResetPassword() {
     setTimeout(() => router.push("/app"), 1500);
   }
 
-  const field = "w-full rounded-lg border border-[var(--line)] bg-black/30 px-3 py-2";
+  const field = "h-11 w-full rounded-xl border border-[var(--line)] bg-[var(--panel)] px-3.5 text-[15px] outline-none transition placeholder:text-[var(--faint)] focus:border-[var(--red-ring)] focus:ring-4 focus:ring-[var(--red-soft)]";
   return (
-    <main className="grid min-h-screen place-items-center px-6">
-      <div className="glass w-full max-w-sm rounded-2xl p-6">
-        <h1 className="mb-4 text-xl font-bold">Choose a new password</h1>
-        {done ? <p role="status" className="text-green-400">Password updated. Taking you to your documents…</p>
+    <main className="grid min-h-screen place-items-center px-6 py-12">
+      <div className="w-full max-w-sm">
+      <div className="mb-8 text-center"><Link href="/" aria-label="Cognix home" className="inline-block rounded-lg focus-ring"><Logo size={30} /></Link></div>
+      <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-6 shadow-[var(--shadow-md)]">
+        <h1 className="font-display mb-5 text-3xl">Choose a new password</h1>
+        {done ? <p role="status" className="text-green-700">Password updated. Taking you to your documents…</p>
           : ready ? (
             <form onSubmit={submit} className="space-y-3">
               <input type="password" required minLength={8} placeholder="New password (8+ characters)" value={password} onChange={(e) => setPassword(e.target.value)} className={field} />
               <input type="password" required minLength={8} placeholder="Repeat new password" value={confirm} onChange={(e) => setConfirm(e.target.value)} className={field} />
-              {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
-              <button className="w-full rounded-lg bg-[var(--red)] py-2 font-semibold text-white">Update password</button>
+              {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+              <button className="focus-ring h-11 w-full rounded-full bg-[var(--ink)] text-[15px] font-medium text-white transition-colors hover:bg-[#2c271f]">Update password</button>
             </form>
           ) : waited ? (
-            <p role="alert" className="text-sm text-red-400">
+            <p role="alert" className="text-sm text-red-700">
               This reset link is invalid or has expired. Reset links only work once, and in the same browser where you asked for them.{" "}
               <Link href="/auth" className="underline">Request a new one</Link>.
             </p>
           ) : <p className="text-[var(--muted)]">Checking your reset link…</p>}
+      </div>
       </div>
     </main>
   );

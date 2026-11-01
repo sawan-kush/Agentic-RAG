@@ -41,7 +41,7 @@ export default function Status() {
           </p>
         </div>
       </div>
-      <button onClick={check} disabled={state.kind === "checking"} className="glass rounded-lg px-4 py-2 text-sm disabled:opacity-50">Check again</button>
+      <button onClick={check} disabled={state.kind === "checking"} className="focus-ring rounded-full border border-[var(--line-strong)] bg-[var(--panel)] px-5 py-2 text-sm font-medium shadow-[var(--shadow-sm)] hover:border-[var(--ink-2)] disabled:opacity-50">Check again</button>
       <p className="text-sm text-[var(--muted)]">This only checks the app’s own server. The AI services it relies on (Gemini, Groq, Pinecone, Supabase) have their own status pages.</p>
     </PageShell>
   );

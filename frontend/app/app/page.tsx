@@ -1,34 +1,29 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { FileText, History, LogOut, Plus, Send, ShieldAlert, ShieldCheck } from "lucide-react";
+import AppSidebar from "@/components/app-sidebar";
+import ChatHeader from "@/components/chat-header";
+import ChatInput from "@/components/chat-input";
+import EmptyChatState from "@/components/empty-chat-state";
+import MessageList from "@/components/message-list";
 import KnowledgeBase from "@/components/knowledge-base";
-import ConversationsDrawer, { type Conv } from "@/components/conversations-drawer";
+import type { Conv, Msg } from "@/components/chat-types";
 import { api, errorText } from "@/lib/api";
 import { supabase } from "@/lib/supabase/client";
-
-type Trace = { agent: string; detail: string; ms: number };
-type Msg = {
-  role: "user" | "ai"; text: string;
-  sources?: { docId: string; fileName: string }[]; trace?: Trace[];
-  verified?: boolean | null;  // undefined = still working, true/false = verifier result, null = no verifier ran
-  corrected?: boolean;        // true if the draft was replaced by a re-checked answer
-};
 
 export default function Dashboard() {
   const router = useRouter();
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
-  const [kbOpen, setKbOpen] = useState(false);
+  const [view, setView] = useState<"chat" | "kb">("chat");   // which screen fills the workspace
+  const [navOpen, setNavOpen] = useState(false);              // mobile sidebar
   const [openDoc, setOpenDoc] = useState<string | null>(null);
   const [convId, setConvId] = useState<string | null>(null);  // null = a brand-new chat that isn't saved yet
   const [convs, setConvs] = useState<Conv[]>([]);
-  const [chatsOpen, setChatsOpen] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
+  const [email, setEmail] = useState("");
 
-  // Keep the newest text in view while the answer streams in.
-  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [msgs]);
+  useEffect(() => { supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? "")); }, []);
 
   async function refreshList(): Promise<Conv[]> {
     const res = await api("/conversations");
@@ -44,7 +39,7 @@ export default function Dashboard() {
     const c = await res.json();
     setConvId(c.id);
     setMsgs(c.messages.map((m: Msg) => ({ role: m.role, text: m.text, sources: m.sources, trace: m.trace, verified: m.verified })));
-    setChatsOpen(false);
+    setView("chat"); setNavOpen(false);
   }
 
   // After a page refresh, reopen the most recently used chat.
@@ -52,7 +47,7 @@ export default function Dashboard() {
     (async () => { const list = await refreshList(); if (list[0]) await openConv(list[0].id); })();
   }, []);
 
-  function newChat() { if (busy) return; setConvId(null); setMsgs([]); setChatsOpen(false); }
+  function newChat() { if (busy) return; setConvId(null); setMsgs([]); setView("chat"); setNavOpen(false); }
 
   async function deleteConv(id: string) {
     await api(`/conversations/${id}`, { method: "DELETE" });
@@ -65,6 +60,9 @@ export default function Dashboard() {
     router.push("/auth");
     router.refresh();
   }
+
+  function openKb(docId: string | null = null) { setOpenDoc(docId); setView("kb"); setNavOpen(false); }
+  function closeKb() { setView("chat"); setOpenDoc(null); }
 
   async function ask(e: React.FormEvent) {
     e.preventDefault();
@@ -109,54 +107,38 @@ export default function Dashboard() {
     }
   }
 
-  const badge = "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs";
+  const empty = msgs.length === 0;
+  const title = convs.find((c) => c.id === convId)?.title ?? (empty ? "New chat" : "New conversation");
+  const input = <ChatInput value={q} onChange={setQ} onSubmit={ask} busy={busy} onOpenKb={() => openKb()} />;
 
   return (
-    <div className="mx-auto flex h-screen max-w-3xl flex-col px-4">
-      <header className="flex items-center justify-between gap-2 py-4">
-        <div className="flex items-center gap-3">
-          <button onClick={() => setChatsOpen(true)} aria-label="Chat history" className="glass rounded-lg p-2"><History size={16} /></button>
-          <h1 className="text-lg font-bold">Document Intelligence</h1>
+    <div className="flex h-dvh overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
+      <AppSidebar convs={convs} activeId={convId} busy={busy} view={view} email={email}
+        mobileOpen={navOpen} onMobileClose={() => setNavOpen(false)}
+        onSelect={openConv} onNew={newChat} onDelete={deleteConv} onOpenKb={() => openKb()} onSignOut={signOut} />
+
+      <main className="relative flex min-w-0 flex-1 flex-col">
+        {empty && view === "chat" && (
+          <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-[440px]"
+            style={{ background: "radial-gradient(55% 60% at 50% 0%, var(--red-soft), transparent 70%)" }} />
+        )}
+        {/* The chat stays mounted while the knowledge base is open, so a streaming answer keeps going. */}
+        <div className={`relative min-h-0 flex-1 flex-col ${view === "kb" ? "hidden" : "flex"}`}>
+          <ChatHeader title={title} busy={busy} divider={!empty} onMenu={() => setNavOpen(true)} onNew={newChat} />
+          {empty ? (
+            <EmptyChatState onOpenKb={() => openKb()}>{input}</EmptyChatState>
+          ) : (
+            <>
+              <MessageList msgs={msgs} busy={busy} visible={view === "chat"} onOpenSource={(id) => openKb(id)} />
+              <div className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-2 sm:px-6">
+                <div className="mx-auto w-full max-w-3xl">{input}</div>
+              </div>
+            </>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={newChat} disabled={busy} className="glass inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm disabled:opacity-50"><Plus size={16} /><span className="hidden sm:inline">New chat</span></button>
-          <button onClick={() => setKbOpen(true)} className="glass inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm"><FileText size={16} /><span className="hidden sm:inline">Knowledge base</span></button>
-          <button onClick={signOut} aria-label="Sign out" className="glass inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm"><LogOut size={16} /><span className="hidden sm:inline">Sign out</span></button>
-        </div>
-      </header>
 
-      <div className="flex-1 space-y-4 overflow-y-auto pb-4" aria-live="polite">
-        {msgs.length === 0 && <p className="mt-24 text-center text-[var(--muted)]">Upload a document in your knowledge base, then ask about it here.</p>}
-        {msgs.map((m, i) => {
-          const last = i === msgs.length - 1;
-          // The draft is on screen but the verifier hasn't finished yet.
-          const checking = last && busy && m.verified === undefined && !!m.text && !!m.trace?.some((t) => t.agent === "Retriever");
-          return m.role === "user"
-            ? <p key={i} className="ml-auto w-fit max-w-[85%] rounded-2xl bg-[var(--red)] px-4 py-2">{m.text}</p>
-            : <div key={i} className="glass rounded-2xl p-4">
-                {m.trace?.length ? <ol className="mb-3 space-y-1 border-l-2 border-[var(--red)] pl-3 text-xs text-[var(--muted)]">
-                  {m.trace.map((t, j) => <li key={j}><b className="text-[var(--ink)]">{t.agent}</b> {t.detail} ({t.ms} ms)</li>)}
-                </ol> : null}
-                <p className="whitespace-pre-wrap">{m.text || (busy && last ? "Working…" : "")}</p>
-                {checking && <p className="mt-2 text-xs text-[var(--muted)]">Draft: checking it against your documents…</p>}
-                {m.verified === true && <span className={`${badge} mt-3 border-green-500/40 text-green-400`}><ShieldCheck size={12} />Verified against your documents{m.corrected ? " (corrected after re-check)" : ""}</span>}
-                {m.verified === false && <span className={`${badge} mt-3 border-amber-500/40 text-amber-400`}><ShieldAlert size={12} />Could not fully verify this answer</span>}
-                {m.sources?.length ? <div className="mt-3 flex flex-wrap gap-2">
-                  {m.sources.map((s) => <button key={s.docId} onClick={() => { setOpenDoc(s.docId); setKbOpen(true); }} className="rounded-full border border-[var(--line)] px-3 py-1 text-xs hover:border-[var(--red)]">{s.fileName}</button>)}
-                </div> : null}
-              </div>;
-        })}
-        <div ref={endRef} />
-      </div>
-
-      <form onSubmit={ask} className="glass mb-4 flex gap-2 rounded-2xl p-2">
-        <input value={q} onChange={(e) => setQ(e.target.value)} maxLength={2000} placeholder="Ask about your documents" className="flex-1 bg-transparent px-3 outline-none" />
-        <button disabled={busy} aria-label="Send" className="rounded-xl bg-[var(--red)] p-3 disabled:opacity-50"><Send size={16} /></button>
-      </form>
-
-      <KnowledgeBase open={kbOpen} onClose={() => { setKbOpen(false); setOpenDoc(null); }} initialDocId={openDoc} />
-      <ConversationsDrawer open={chatsOpen} onClose={() => setChatsOpen(false)} items={convs} activeId={convId} busy={busy}
-        onSelect={openConv} onNew={newChat} onDelete={deleteConv} />
+        <KnowledgeBase open={view === "kb"} onClose={closeKb} initialDocId={openDoc} onMenu={() => setNavOpen(true)} />
+      </main>
     </div>
   );
 }

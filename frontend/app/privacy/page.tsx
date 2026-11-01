@@ -1,8 +1,6 @@
 import PageShell, { Section } from "@/components/page-shell";
 
-export const metadata = { title: "Privacy · Precision Document Intelligence" };
-
-export default function Privacy() {
+export const metadata = { title: "Privacy · Cognix" };
   return (
     <PageShell title="Privacy">
       <p className="text-[var(--muted)]">In plain language: what is stored, where, and who else sees your text. This is a small project built on free-tier services, so please read the Google note below before uploading anything.</p>
