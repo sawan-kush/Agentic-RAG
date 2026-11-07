@@ -7,8 +7,9 @@ Event types (one JSON object per line):
   verified  {"grounded","unsupported"}   result of the verifier (only for document answers)
   done      {"sources"}                  always the last event
 """
-import asyncio, time
-from app.config import llm, supabase
+import asyncio, json, time
+from app import cache
+from app.config import llm, supabase, MODEL_SALT
 from app.agents.router import route_query, format_history
 from app.agents.retriever import retrieve
 from app.agents.verifier import verify
@@ -50,8 +51,56 @@ def answer_prompt(query: str, chunks, hist_text: str) -> str:
             f"{convo}Context:\n{ctx}\n\nQuestion: {query}")
 
 
+SQL_ANSWER_TTL = 300  # answers about the document list can mention dates ("today"), so keep them short-lived
+
+
+async def answer_cache_key(query: str, user_id: str, history: list[dict]) -> str | None:
+    """Same user + same question + same chat context + same document library + same models = same answer.
+    Returns None when Redis can't be used (then nothing is looked up or stored)."""
+    version = await cache.docs_version(user_id)  # changes on every upload / delete (see main.py)
+    if version is None:
+        return None
+    convo = json.dumps([[m["role"], m["text"]] for m in history], ensure_ascii=False)
+    return cache.key("ans", cache.digest(MODEL_SALT, user_id, version, " ".join(query.split()), convo))
+
+
 async def run_pipeline(query: str, user_id: str, history: list[dict] | None = None):
+    """Public entry point (same events as before). A repeated question is answered from Redis; anything
+    else runs the real pipeline below and, if the result is complete and trustworthy, is stored."""
     history = history or []
+    t = time.perf_counter()
+    key = await answer_cache_key(query, user_id, history)
+    hit = await cache.aget_json(key) if key else None
+    if isinstance(hit, dict) and "text" in hit and "sources" in hit:  # anything else counts as a miss
+        yield trace("Cache", "answer served from Redis", t)
+        yield {"type": "token", "text": hit["text"]}
+        if hit.get("verified"):
+            yield {"type": "verified", **hit["verified"]}
+        yield {"type": "done", "sources": hit["sources"]}
+        return
+
+    parts: list[str] = []
+    verified, used_sql = None, False
+    async for ev in _run_pipeline(query, user_id, history):
+        if ev["type"] == "token":
+            parts.append(ev["text"])
+        elif ev["type"] == "replace":
+            parts = [ev["text"]]
+        elif ev["type"] == "verified":
+            verified = {"grounded": ev["grounded"], "unsupported": ev["unsupported"]}
+        elif ev["type"] == "trace" and ev["agent"] == "Metadata query":
+            used_sql = True
+        elif ev["type"] == "done":
+            text = "".join(parts)
+            # Store before `done` goes out. Never store an empty answer, or an answer the verifier could
+            # not confirm (a retry might do better). direct/sql answers have no verifier (verified is None).
+            if key and text.strip() and (verified is None or verified["grounded"]):
+                await cache.aset_json(key, {"text": text, "sources": ev["sources"], "verified": verified},
+                                      min(cache.ANSWER_TTL, SQL_ANSWER_TTL) if used_sql else cache.ANSWER_TTL)
+        yield ev
+
+
+async def _run_pipeline(query: str, user_id: str, history: list[dict]):
     hist_text = format_history(history)
 
     t = time.perf_counter()

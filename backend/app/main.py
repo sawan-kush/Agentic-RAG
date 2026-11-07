@@ -1,4 +1,5 @@
 import asyncio, json, os, uuid
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -7,8 +8,17 @@ from app.config import supabase
 from app.pipeline import run_pipeline
 from app.ingestion import ingest, delete_document, MAX_BYTES
 from app import conversations as convs
+from app import cache
 
-app = FastAPI(title="Agentic RAG API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    print(f"[cache] Redis: {await cache.status()}")  # disabled | up | down -- visible in `docker compose logs backend`
+    yield
+    await cache.close()
+
+
+app = FastAPI(title="Agentic RAG API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:3000")],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -17,11 +27,17 @@ async def current_user(authorization: str = Header(None)) -> str:
     """Verifies the Supabase JWT sent by the frontend and returns the user id."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing token")
+    token = authorization.removeprefix("Bearer ")
+    cached = await cache.cached_user(token)  # a few seconds of memory saves a Supabase round trip per request
+    if cached:
+        return cached
     try:
-        res = await asyncio.to_thread(supabase.auth.get_user, authorization.removeprefix("Bearer "))
-        return res.user.id
+        res = await asyncio.to_thread(supabase.auth.get_user, token)
+        user_id = res.user.id
     except Exception:
         raise HTTPException(401, "Invalid token")
+    await cache.remember_user(token, user_id)  # only verified tokens get here
+    return user_id
 
 
 def valid_uuid(value: str) -> str:
@@ -42,8 +58,10 @@ def line(event: dict) -> str:
 
 
 @app.get("/health")
-def health():
-    return {"ok": True}
+async def health():
+    # `ok` only says the API itself is alive. Redis is an optional accelerator, so its state is reported
+    # separately and never makes the API "unhealthy".
+    return {"ok": True, "redis": await cache.status()}
 
 
 @app.post("/chat")
@@ -110,10 +128,16 @@ async def remove_conversation(conv_id: str, user_id: str = Depends(current_user)
 @app.post("/ingest")
 async def ingest_route(file: UploadFile, user_id: str = Depends(current_user)):
     data = await file.read(MAX_BYTES + 1)  # read at most 10 MB + 1 byte, enough to detect "too big"
-    return await ingest(user_id, file.filename or "upload", data)
+    try:
+        return await ingest(user_id, file.filename or "upload", data)
+    finally:  # the library changed (or may have, if indexing failed halfway): old cached answers must not be reused
+        await cache.bump_docs_version(user_id)
 
 
 @app.delete("/documents/{doc_id}")
 async def delete_document_route(doc_id: str, user_id: str = Depends(current_user)):
-    await delete_document(user_id, valid_uuid(doc_id))
+    try:
+        await delete_document(user_id, valid_uuid(doc_id))
+    finally:
+        await cache.bump_docs_version(user_id)  # same reason as in /ingest
     return {"deleted": doc_id}

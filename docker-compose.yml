@@ -1,0 +1,60 @@
+# Agentic RAG: frontend (Next.js) + backend (FastAPI) + Redis.
+# Everything reads ONE file: .env in this folder (copy .env.example to .env first).
+name: agentic-rag
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"                      # cache survives restarts (re-embedding costs API quota, so it's worth keeping)
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}  # hard cap: Redis can never eat all your RAM
+      - --maxmemory-policy
+      - allkeys-lru                # when full, silently drop the least recently used entries
+    ports:
+      - "127.0.0.1:6379:6379"      # localhost only (handy for redis-cli / running the backend outside Docker)
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    image: agentic-rag-backend
+    env_file: .env
+    environment:
+      # Inside the compose network Redis is reachable by its service name, not localhost.
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the browser bundle at build time. NEXT_PUBLIC_API_URL is what the BROWSER calls,
+        # so it must be an address your browser can reach (http://localhost:8000), not "backend".
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:?Set NEXT_PUBLIC_SUPABASE_URL in .env}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:?Set NEXT_PUBLIC_SUPABASE_ANON_KEY in .env}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    image: agentic-rag-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:

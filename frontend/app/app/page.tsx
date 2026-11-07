@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import AppSidebar from "@/components/app-sidebar";
 import ChatHeader from "@/components/chat-header";
@@ -22,6 +22,8 @@ export default function Dashboard() {
   const [convId, setConvId] = useState<string | null>(null);  // null = a brand-new chat that isn't saved yet
   const [convs, setConvs] = useState<Conv[]>([]);
   const [email, setEmail] = useState("");
+  const [ready, setReady] = useState(false);  // true once the first load has finished (only then may we touch the address bar)
+  const loadSeq = useRef(0);                  // bumped whenever the chat on screen changes, so a slow, older load can't overwrite a newer one
 
   useEffect(() => { supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? "")); }, []);
 
@@ -33,25 +35,44 @@ export default function Dashboard() {
     return list;
   }
 
-  async function openConv(id: string) {
+  // Opens a saved chat with ALL its messages, in order. Returns false if it couldn't be shown.
+  async function openConv(id: string): Promise<boolean> {
+    const seq = ++loadSeq.current;
     const res = await api(`/conversations/${id}`);
-    if (!res.ok) return;
+    if (seq !== loadSeq.current) return false;       // meanwhile you opened another chat / started a new one: drop this answer
+    if (!res.ok) { if (res.status === 404) refreshList(); return false; }  // 404: that chat is gone, so refresh the sidebar
     const c = await res.json();
+    if (seq !== loadSeq.current) return false;
     setConvId(c.id);
-    setMsgs(c.messages.map((m: Msg) => ({ role: m.role, text: m.text, sources: m.sources, trace: m.trace, verified: m.verified })));
+    setMsgs(c.messages.map((m: Msg) => ({ role: m.role, text: m.text, sources: m.sources ?? [], trace: m.trace ?? [], verified: m.verified })));
     setView("chat"); setNavOpen(false);
+    return true;
   }
 
-  // After a page refresh, reopen the most recently used chat.
+  // First load (like ChatGPT): the address says which chat you are in (/app?c=<id>), so a refresh keeps you in the
+  // same chat. With no ?c= you get a fresh chat, and every saved chat is one click away in the sidebar.
   useEffect(() => {
-    (async () => { const list = await refreshList(); if (list[0]) await openConv(list[0].id); })();
+    (async () => {
+      const seq = loadSeq.current;  // if anything changes on screen from here on (you send a message, click a chat, press New chat) this load gives up
+      await refreshList();
+      const wanted = new URLSearchParams(window.location.search).get("c");
+      if (wanted && seq === loadSeq.current) await openConv(wanted);
+      setReady(true);
+    })();
   }, []);
 
-  function newChat() { if (busy) return; setConvId(null); setMsgs([]); setView("chat"); setNavOpen(false); }
+  // Keep the address bar in step with the open chat.
+  useEffect(() => {
+    if (!ready) return;
+    const url = convId ? `/app?c=${convId}` : "/app";
+    if (window.location.pathname + window.location.search !== url) window.history.replaceState(null, "", url);
+  }, [ready, convId]);
+
+  function newChat() { if (busy) return; loadSeq.current++; setConvId(null); setMsgs([]); setView("chat"); setNavOpen(false); }
 
   async function deleteConv(id: string) {
     await api(`/conversations/${id}`, { method: "DELETE" });
-    if (id === convId) { setConvId(null); setMsgs([]); }
+    if (id === convId) { loadSeq.current++; setConvId(null); setMsgs([]); }
     refreshList();
   }
 
@@ -68,8 +89,10 @@ export default function Dashboard() {
     e.preventDefault();
     if (!q.trim() || busy) return;
     const query = q; setQ(""); setBusy(true);
+    loadSeq.current++;  // a chat that is still loading in the background must not wipe the message we are about to show
     setMsgs((m) => [...m, { role: "user", text: query }, { role: "ai", text: "", trace: [] }]);
-    const patch = (fn: (m: Msg) => Msg) => setMsgs((all) => [...all.slice(0, -1), fn(all[all.length - 1])]);
+    // Updates the newest (answer) message. If the list was emptied meanwhile there is nothing to update, so do nothing.
+    const patch = (fn: (m: Msg) => Msg) => setMsgs((all) => all.length ? [...all.slice(0, -1), fn(all[all.length - 1])] : all);
 
     try {
       const res = await api("/chat", { method: "POST", headers: { "Content-Type": "application/json" },

@@ -1,11 +1,20 @@
 """Agent 1: Intent & Routing. Decides which tool handles the query."""
 import json, re
-from app.config import llm
+from app import cache
+from app.config import llm, MODEL_SALT
 
 
 async def ask_json(prompt: str):
+    # The router, query rewriter and verifier all come through here, and the LLM runs at temperature 0,
+    # so an identical prompt gets an identical answer: reuse it from Redis. Only parsed (valid) JSON is stored.
+    k = cache.key("llm", cache.digest(MODEL_SALT, prompt))
+    hit = await cache.aget_json(k)
+    if hit is not None:
+        return hit
     r = await llm.acomplete(prompt + "\nRespond with JSON only.")
-    return json.loads(re.sub(r"```(?:json)?", "", r.text).strip())
+    parsed = json.loads(re.sub(r"```(?:json)?", "", r.text).strip())
+    await cache.aset_json(k, parsed, cache.LLM_TTL)
+    return parsed
 
 
 def format_history(history: list[dict] | None, max_chars: int = 400) -> str:

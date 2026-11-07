@@ -9,6 +9,7 @@ from groq import AsyncGroq
 from llama_index.core import Settings
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from llama_index.vector_stores.pinecone import PineconeVectorStore
+from app.cached_embedding import CachedEmbedding
 
 load_dotenv()  # must run before the clients below read the environment
 
@@ -16,13 +17,19 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "gemini-embedding-001")
 EMBED_DIM = 1536  # must match the Pinecone index dimension
+# Part of every Redis cache key, so changing a model in .env can never serve answers made by the old one.
+MODEL_SALT = f"{GEMINI_MODEL}|{GROQ_MODEL}|{EMBED_MODEL}|{EMBED_DIM}"
 
 # ---- Embeddings: Gemini only (Groq has no embedding models, and vectors from
 # different models can't be mixed in one index, so there is no fallback here) ----
-Settings.embed_model = GoogleGenAIEmbedding(
-    model_name=EMBED_MODEL,
-    api_key=os.environ["GEMINI_API_KEY"],
-    embedding_config=types.EmbedContentConfig(output_dimensionality=EMBED_DIM),
+# CachedEmbedding keeps vectors in Redis (a no-op when REDIS_URL is empty), so no text is embedded twice.
+Settings.embed_model = CachedEmbedding(
+    GoogleGenAIEmbedding(
+        model_name=EMBED_MODEL,
+        api_key=os.environ["GEMINI_API_KEY"],
+        embedding_config=types.EmbedContentConfig(output_dimensionality=EMBED_DIM),
+    ),
+    namespace=f"{EMBED_MODEL}:{EMBED_DIM}",
 )
 Settings.llm = None  # we call our own LLM below; stops LlamaIndex defaulting to OpenAI
 

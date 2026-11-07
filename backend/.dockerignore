@@ -1,0 +1,18 @@
+# Secrets must never be baked into an image: they come from the root .env at runtime.
+.env
+.env.*
+!.env.example
+
+# Python / local tooling
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Not needed at runtime
+tests/
+pytest.ini
+requirements-dev.txt
+Dockerfile
+.dockerignore

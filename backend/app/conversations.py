@@ -23,21 +23,43 @@ async def load_history(user_id: str, conv_id: str) -> list[dict] | None:
     return await asyncio.to_thread(work)
 
 
+def make_title(query: str, limit: int = 60) -> str:
+    """The chat's title: its first question, on one line, cut at a word boundary (not in the middle of a word)."""
+    text = " ".join(query.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
 async def save_exchange(user_id: str, conv_id: str | None, query: str, answer: str,
                         sources: list, trace: list, verified: bool | None) -> str:
-    """Saves the question + answer. Creates the conversation first if this is a new chat. Returns its id."""
+    """Saves the question + answer into ONE conversation and returns its id.
+    A new chat (conv_id is None) gets a new conversation, titled after its first question; a follow-up
+    is appended to the existing one, so a chat is always a single entry in the sidebar.
+    The two messages go in with one insert (both are saved or neither), and every column is given
+    explicitly, so the database never has to guess a value."""
     def work():
-        cid = conv_id
+        cid, created = conv_id, False
         if not cid:
-            title = " ".join(query.split())[:60] + ("…" if len(query) > 60 else "")  # title = first question
-            cid = supabase.table("conversations").insert({"user_id": user_id, "title": title}).execute().data[0]["id"]
-        supabase.table("messages").insert([  # one insert; ids are assigned in list order
-            {"conversation_id": cid, "user_id": user_id, "role": "user", "text": query},
-            {"conversation_id": cid, "user_id": user_id, "role": "ai", "text": answer,
-             "sources": sources, "trace": trace, "verified": verified},
-        ]).execute()
+            cid = supabase.table("conversations").insert({"user_id": user_id, "title": make_title(query)}).execute().data[0]["id"]
+            created = True
+        try:
+            supabase.table("messages").insert([  # one insert; ids are assigned in list order
+                {"conversation_id": cid, "user_id": user_id, "role": "user", "text": query,
+                 "sources": [], "trace": [], "verified": None},
+                {"conversation_id": cid, "user_id": user_id, "role": "ai", "text": answer,
+                 "sources": sources, "trace": trace, "verified": verified},
+            ]).execute()
+        except Exception:
+            if created:  # never leave an empty chat behind in the sidebar
+                try:
+                    supabase.table("conversations").delete().eq("id", cid).eq("user_id", user_id).execute()
+                except Exception:
+                    pass
+            raise
         supabase.table("conversations").update({"updated_at": _now()}).eq("id", cid).eq("user_id", user_id).execute()
-        return cid
+        return cid  # (the update above moves this chat to the top of the sidebar)
     return await asyncio.to_thread(work)
 
 

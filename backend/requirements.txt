@@ -10,3 +10,4 @@ groq
 llama-index-core
 llama-index-embeddings-google-genai
 llama-index-vector-stores-pinecone
+redis>=5.0.1
